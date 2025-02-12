@@ -1,0 +1,898 @@
+---
+title: "Project1(960:588 Data Mining, Fall 2024)"
+author: "Jennifer Nasirumbi, Udayveer Singh Andotra, Andrew Walker"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+```{r message=FALSE, warning=FALSE}
+# Install necessary packages if not already installed
+#install.packages(c("SuperLearner", "caret", "glmnet", "rpart", "ranger", "xgboost", #"earth", "e1071", "nnet", "MASS", "kknn"))
+
+# Load libraries
+library(SuperLearner); library(caret); library(glmnet); library(rpart)
+library(ranger); library(xgboost); library(earth); library(e1071)
+library(MASS); library(kknn); library(party)   # For Conditional Inference Trees (ctree)
+library(nnet)                   # For Neural Networks
+library(randomForest); library(kernlab); library(cvAUC)
+
+rm(list=ls()) # clear out the memory and refresh,flush all those variables not being used anymore
+# Check current working directory
+getwd()
+# If necessary, set the working directory to where the files are located
+setwd(".")
+
+# Load the training dataset (pex23train.RDS)
+pex23train <- readRDS("pex23train.RDS")
+# Load the test dataset (pex23.test)
+pex23test <- readRDS("pex23test.RDS")
+
+################
+# Get the first 23 columns' names in both datasets
+train_cols <- colnames(pex23train)[1:23]
+test_cols <- colnames(pex23test)[1:23]
+colnames(pex23test)[1:23] <- train_cols
+#Rename the 24th column in the training set to 'ytrain'
+colnames(pex23train)[24] <- "ytrain"
+# Verify the column names in both datasets
+cat("Column names in pex23train:\n")
+print(colnames(pex23train))
+cat("Column names in pex23test:\n")
+print(colnames(pex23test))
+
+##################
+# Set a random seed for reproducibility
+set.seed(23)
+
+# Create the index for training set (80%)
+train_index <- createDataPartition(pex23train$ytrain, p = 0.8, list = FALSE)
+
+# Split the data into training and validation sets
+train_set <- pex23train[train_index, ]
+validation_set <- pex23train[-train_index, ]
+
+# Check the size of the resulting datasets
+cat("Training set size:", nrow(train_set), "\n")
+cat("Validation set size:", nrow(validation_set), "\n")
+
+
+# Check the structure of the loaded datasets
+str(pex23train)
+summary(pex23train)
+################Decriptive statistics and plots
+# Create a table of counts for each category in ytrain
+ytrain_table <- table(pex23train$ytrain)
+# Basic bar plot with thinner bars, different colors, and count labels inside bars
+barplot_heights <- barplot(ytrain_table, 
+                           main = "Distribution of ytrain", 
+                           xlab = "Explosives vs No Explosives", 
+                           ylab = "Count", 
+                           col = c("skyblue", "lightcoral"),  # Different colors for each class
+                           beside = TRUE,                     # Side-by-side bars for each class
+                           space = 5,                          # Increase space between bars
+                           ylim = c(0, max(ytrain_table) + 10))  # Make space for labels above bars
+
+# Modify x-axis to show custom labels for 0 and 1
+axis(1, at = barplot_heights, labels = c("Explosives", "No Explosives"))
+
+# Add count labels inside the bars
+text(x = barplot_heights, 
+     y = ytrain_table / 2,  # Position the labels inside the bars (halfway up each bar)
+     labels = ytrain_table, 
+     col = "black", 
+     cex = 1.5)  # Larger label size for better readability
+
+######
+library(psych)
+# Run the describe function to get descriptive statistics for the dataset
+description <- describe(pex23train)
+# Extract only the columns you're interested in
+common_stats <- description[, c("mean", "sd", "min", "max", "range", "skew", "kurtosis")]
+# Print the selected statistics
+print(common_stats)
+######
+boxplot(pex23train[,1:23])
+
+library(lattice)
+library(tidyr)
+######
+# Find the maximum density value across all variables
+max_density <- max(sapply(1:23, function(i) max(density(pex23train[[paste("V", i, sep = "")]])$y)))
+
+# Create an empty plot for the first variable
+plot(density(pex23train$V1), 
+     main = "Density Plots for v1 to v23", 
+     xlab = "Values", 
+     col = "blue", 
+     lwd = 2, 
+     ylim = c(0, max_density))  # Dynamically adjust y-axis based on max density
+
+# Overlay the density plots for v2 to v23
+for(i in 2:23) {
+  lines(density(pex23train[[paste("V", i, sep = "")]]), 
+        col = i, 
+        lwd = 2)
+}
+
+# Add a legend to the plot
+legend("topright", 
+       legend = paste("V", 1:23, sep = ""), 
+       col = 1:23, 
+       lty = 1, 
+       lwd = 2)
+
+############
+# Calculate the maximum density across all variables
+max_density <- max(sapply(1:23, function(i) {
+  max(density(pex23train[[paste("V", i, sep = "")]])$y)
+}))
+
+# Set up the grid layout (e.g., 5 rows and 5 columns for 23 plots)
+par(mfrow = c(5, 5), mar = c(4, 4, 2, 1))  # Adjust margins for better spacing
+
+# Loop through each variable (V1 to V23)
+for(i in 1:23) {
+  # Calculate the density for the current variable
+  dens <- density(pex23train[[paste("V", i, sep = "")]])
+  
+  # Create the density plot for each variable with dynamic y-limits
+  plot(dens, 
+       main = paste("Density of V", i), 
+       xlab = "Values", 
+       col = i, 
+       lwd = 2, 
+       ylim = c(0, max_density))  # Set the y-limit to the max density calculated earlier
+}
+
+# Reset the plotting layout to the default
+par(mfrow = c(1, 1))
+
+
+############
+# Compute the correlation matrix for variables V1 to V24
+cor_matrix <- cor(pex23train[, 1:24])
+
+# Plot the pairs (scatterplot matrix) with correlation coefficients
+# Plot the scatterplot matrix of variables V1 to V24
+pairs(pex23train[, 1:24], 
+      main = "Scatterplot Matrix of Variables V1 to V24", 
+      lower.panel = panel.smooth,  # Add smooth lines to the lower panel
+      upper.panel = function(x, y) {
+        # Add correlation coefficient in the upper panel
+        # Adjust position of text for better visualization
+        usr <- par("usr")  # Get the current plot limits
+        text(usr[1] + 0.5 * diff(usr[1:2]), usr[3] + 0.5 * diff(usr[3:4]), 
+             round(cor(x, y), 2), cex = 0.7)
+      }
+)
+
+
+
+
+
+```
+
+```{r SuperLearner without Hyperparams, message=FALSE, warning=FALSE}
+# Custom wrapper for PPR
+SL.ppr <- function(Y, X, newX, family, obsWeights, nterms = 2, ...) {
+  if (family$family == "gaussian") {
+    # Regression case
+    fit <- ppr(X, Y, nterms = nterms, weights = obsWeights, ...)
+    pred <- predict(fit, newdata = newX)
+  } else if (family$family == "binomial") {
+    # Binary classification case
+    # Transform Y to probabilities (0/1 target)
+    fit <- ppr(X, as.numeric(Y), nterms = nterms, weights = obsWeights, ...)
+    logits <- predict(fit, newdata = newX)  # PPR outputs logits
+    pred <- exp(logits) / (1 + exp(logits))  # Convert logits to probabilities
+  } else {
+    stop("Only gaussian and binomial families are supported for SL.ppr.")
+  }
+  
+  fit <- list(object = fit, family = family)
+  class(fit) <- "SL.ppr"
+  out <- list(pred = pred, fit = fit)
+  return(out)
+}
+
+# Prediction function for SL.ppr
+predict.SL.ppr <- function(object, newdata, ...) {
+  if (object$fit$family$family == "gaussian") {
+    predict(object$object, newdata = newdata, ...)
+  } else if (object$fit$family$family == "binomial") {
+    logits <- predict(object$object, newdata = newdata, ...)
+    exp(logits) / (1 + exp(logits))  # Convert logits to probabilities
+  } else {
+    stop("Unsupported family in predict.SL.ppr.")
+  }
+}
+
+
+
+# Define learner list
+learners <- c(
+  "SL.glm",        # Generalized Linear Model
+  "SL.glmnet",     # Elastic Net Model (via glmnet)
+   #c("SL.glmnet", "screen.corP"),
+  "SL.randomForest", # Random Forest
+  "SL.xgboost",    # XGBoost
+  "SL.svm",        # Support Vector Machine
+  "SL.mean",       # mean of Y (“SL.mean”) as a benchmark algorithm
+  "SL.knn",        # K-Nearest Neighbors
+  "SL.lda",        # Linear Discriminant Analysis
+  "SL.qda",        # Quadratic Discriminant Analysis
+  "SL.nnet",       # Neural Network
+  "SL.rpart",      # Recursive Partitioning Trees (Decision Trees)
+  "SL.earth",           # Projection Pursuit Regression (ppr) 
+  "SL.gam",           # MARS (Multivariate Adaptive Regression Splines) from the 'earth' 
+  "SL.ppr"
+)
+
+# Combine all learners into a SuperLearner model without hyperparameter
+sl_model <- SuperLearner(
+  Y = train_set$ytrain,          # Response variable (binary outcome)
+  X = train_set[, 1:23],         # Feature matrix (exclude target column)
+  SL.library = learners,         # List of base learners
+  family = binomial(),           # For binary classification (binomial distribution)
+  #method = "method.AUC",      # maximize AUC
+  #verbose = TRUE                 # Print progress during training
+)
+
+# Print the SuperLearner model summary
+print(sl_model)
+
+
+####################################
+# Load the necessary libraries
+library(caret)  # For confusion matrix
+
+# Assuming sl_model is your trained SuperLearner model and train_set$ytrain contains the true labels
+
+# Get the predicted probabilities (use the SuperLearner object directly for predictions)
+pred_probs <- sl_model$SL.predict  # Predicted probabilities from SuperLearner model
+
+# Convert the predicted probabilities to binary class predictions using a threshold of 0.5
+pred_class <- ifelse(pred_probs > 0.5, 1, 0)
+
+# Compute the confusion matrix comparing predicted vs true labels
+confusion <- confusionMatrix(as.factor(pred_class), as.factor(train_set$ytrain))
+
+# Print the confusion matrix
+print(confusion)
+table(train_set$ytrain)
+
+
+######################
+# Extract the coefficients from the three models
+coef_sl_model <- sl_model$coef
+
+# Create a data frame to store the coefficients from all three models
+coef_df <- data.frame(
+  Model = names(coef_sl_model),  # Repeating model names for each coefficient set
+  Coefficient = c(coef_sl_model),  # Concatenating coefficients
+  BaseSuperlearner = rep(c("base superlearner"), each = length(coef_sl_model))  # Model labels
+)
+
+# Load ggplot2 for plotting
+library(ggplot2)
+
+# Create the plot
+ggplot(coef_df, aes(x = reorder(Model, Coefficient), y = Coefficient, fill = BaseSuperlearner)) +
+  geom_bar(stat = "identity", position = "dodge") +  # Bar plot with dodged bars for comparison
+  coord_flip() +  # Flip the axes for better readability
+  labs(title = "Coefficients from SuperLearner Model", 
+       x = "Model", 
+       y = "Coefficient") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),  # Rotate x-axis labels for readability
+        legend.position = "top")  # Position legend at the top
+
+
+
+```
+
+
+```{r CV.superLearner, message=FALSE, warning=FALSE}
+# Use CV.superLearner to evaluate the model
+sl_model_cv <- CV.SuperLearner(
+  Y = train_set$ytrain,          # Response variable (binary outcome)
+  X = train_set[, 1:23],         # Feature matrix (exclude target column)
+  SL.library = learners,         # List of base learners
+  family = binomial(),           # For binary classification (binomial distribution)
+  V = 10,
+  #method = "method.AUC",         # maximize AUC
+  #verbose = TRUE                 # Print progress during training
+  control = list(saveFitLibrary = TRUE)
+)
+
+print(sl_model_cv)
+plot(sl_model_cv) + theme_bw(base_size = 15)
+
+######################################
+#########
+# Extract cross-validated predicted probabilities from each base learner
+cv_preds <- sl_model_cv$library.predict
+
+# Store the predicted probabilities for each base model in a list using actual learner names
+# Remove the "SL." prefix from the learner names
+base_learners <- sub("SL.", "", learners)
+
+cv_probs <- setNames(lapply(1:length(base_learners), function(i) {
+  cv_preds[, i]  # Get the predictions from each base learner
+}), base_learners)
+
+
+#####################################################
+####################################################
+######plot for each base learner
+##################################
+library(pROC)  # For ROC and AUC calculation
+library(caret) # For confusion matrix
+
+dev.new()
+
+for (model_name in names(cv_probs)) {
+  
+  # Compute the ROC curve and AUC
+  roc_obj <- roc(train_set$ytrain, cv_probs[[model_name]])
+  auc_value <- auc(roc_obj)
+  
+  # Plot the ROC curve
+  plot(roc_obj, main = paste("ROC Curve for", model_name), col = "blue", lwd = 2, 
+       xlab = "False Positive Rate", ylab = "True Positive Rate")
+  
+  # Add the AUC legend
+  legend("bottomright", legend = paste("AUC =", round(auc_value, 2)), col = "blue", lwd = 2)
+  
+  # Convert predicted probabilities into class predictions using a threshold of 0.5
+  pred_class <- ifelse(cv_probs[[model_name]] > 0.5, 1, 0)
+  
+  # Compute confusion matrix
+  confusion <- confusionMatrix(as.factor(pred_class), as.factor(train_set$ytrain))
+  
+  # Overlay the confusion matrix on the ROC plot as text with larger font
+  confusion_text <- capture.output(confusion)
+  
+  # Increase the text size and adjust positioning
+  text(x = 0.5, y = 0.1, labels = paste(confusion_text, collapse = "\n"), cex = 0.8, 
+       col = "black", pos = 4, font = 2)
+  
+  # Print the AUC value in the console
+  cat("\nAUC for", model_name, ":", round(auc_value, 2), "\n\n")
+}
+
+
+
+
+```
+
+
+```{r predictedProbs, message=FALSE, warning=FALSE}
+###############################################################
+library(caret)    # For confusion matrix and other metrics
+library(pROC)     # For ROC and AUC
+library(SuperLearner)  # For SuperLearner predictions
+
+# Step 1: Subset the validation data to match the first 23 predictors
+validation_data <- validation_set[, 1:23]
+
+# Step 2: Get the predicted probabilities using the SuperLearner model
+pred_probs <- predict.SuperLearner(sl_model, newdata = validation_data, X = train_set[, 1:23], Y = train_set$ytrain, onlySL = TRUE)$pred
+
+# Step 3: Convert predicted probabilities into class predictions (using 0.5 as the threshold)
+  pred_class <- ifelse(pred_probs > 0.5, 1, 0)
+
+# Convert predicted classes and true labels into factors with the same levels
+pred_class <- factor(pred_class, levels = c(0, 1))  # Assuming 0 and 1 as the class labels
+true_labels <- factor(validation_set$ytrain, levels = c(0, 1))  # Ensure the same factor levels for the true labels
+
+# Compute confusion matrix
+confusion <- confusionMatrix(pred_class, true_labels)
+
+# Print confusion matrix
+print(confusion)
+
+# Misclassification rate calculation
+misclassification_rate <- 1 - confusion$overall["Accuracy"]
+cat("Misclassification Rate:", round(misclassification_rate, 4), "\n")
+
+## Confusion Matrix for Train
+
+train_data <- train_set[, 1:23]
+pred_probs <- predict.SuperLearner(sl_model, newdata = train_data, X = train_set[, 1:23], Y = train_set$ytrain, onlySL = TRUE)$pred
+pred_class <- ifelse(pred_probs > 0.5, 1, 0)
+pred_class <- factor(pred_class, levels = c(0, 1))  # Assuming 0 and 1 as the class labels
+true_labels <- factor(train_set$ytrain, levels = c(0, 1))  # Ensure the same factor levels for the true labels
+
+# Compute confusion matrix
+confusion <- confusionMatrix(pred_class, true_labels)
+print(confusion)
+###############################################################
+
+dev.new()
+# Histogram of our predicted values.
+library(ggplot2)
+# Check lengths (debugging step)
+print(length(validation_set$ytrain))
+print(length(pred_probs[, 1]))
+
+#aw using ggplot instead of qplot that is deprecated
+# Create a data frame for ggplot
+plot_data <- data.frame(
+  actual = validation_set$ytrain,
+  predicted = pred_probs[, 1]
+)
+ggplot(plot_data, aes(x = actual, y = predicted)) +
+  geom_jitter(alpha = 0.5, width = 0.1, height = 0) +  # Add jitter
+  theme_minimal() +
+  labs(
+    title = "Predicted vs Actual - validation dataset",
+    x = "Actual",
+    y = "Predicted"
+  )
+
+
+# Step 2: View the predicted probabilities for class 1 (in a binary classification task)
+pred_probabilities <- pred_probs
+# Step 3: Examine the distribution of the predicted probabilities
+hist(pred_probabilities, main = "Histogram/distribution of Predicted Probabilities", xlab = "Predicted Probability", ylab = "Frequency", col = "lightblue")
+# Plot the predicted probability for class 1
+plot(pred_probabilities, type = "l", col = "blue", main = "Predicted Probabilities", xlab = "Observation Index", ylab = "Predicted Probability")
+
+# Review AUC - Area Under Curve
+library(ROCR)
+
+# Assuming pred$pred contains the predicted probabilities (e.g., from a classifier)
+# and validation_set[, ncol(validation_set)] contains the true labels (binary 0/1)
+
+# Extract true labels
+labels <- validation_set[, ncol(validation_set)]
+
+# Create a ROCR prediction object
+pred_rocr <- ROCR::prediction(pred_probs, labels)
+
+# Calculate the AUC (Area Under the Curve)
+auc <- ROCR::performance(pred_rocr, measure = "auc", x.measure = "cutoff")@y.values[[1]]
+print(paste("AUC: ", auc))
+
+# Plot the ROC curve
+roc_performance <- ROCR::performance(pred_rocr, measure = "tpr", x.measure = "fpr")
+
+# Plot ROC curve (FPR vs TPR)
+# Plot the ROC curve
+plot(roc_performance, main = paste("Sensitivity vs.Specificity"), 
+     xlab = "1 - Specificity (False Positive Rate)", ylab = "Sensitivity (True Positive Rate)", col = "blue", lwd = 2)
+
+# Add the AUC value to the plot
+legend("bottomright", legend = paste("AUC =", round(auc, 3)), col = "blue", lwd = 2)
+
+# Optional: Add a diagonal line representing random classifier performance (AUC = 0.5)
+abline(a = 0, b = 1, col = "red", lty = 2)
+
+
+
+```
+
+```{r perfEval, message=FALSE, warning=FALSE}
+#Deliverables
+#Please use the files pex23train.RDS pex23.test.
+#2. Note that you don’t have the test set predictions. Please upload your
+#prediction vector on an RDS file and I will evaluate your test set predictions.
+#############
+# Predict on the test set (if available)
+X_test <- pex23test
+predictions_test <- predict(sl_model, newdata=X_test,  X=train_set[, 1:23] , Y=train_set$ytrain, onlySL=TRUE)$pred
+predictions_class_test<-ifelse(predictions_test>0.5,1,0)
+
+```
+
+
+```{r message=FALSE, warning=FALSE}
+
+library(SuperLearner)
+library(rpart)
+library(xgboost)
+library(earth)
+library(e1071)
+library(MASS)
+library(dplyr)
+library(pROC)
+library(GA) 
+library(caret)
+
+# Load the training dataset (pex23train.RDS)
+pex23train <- readRDS("pex23train.RDS")
+# Load the test dataset (pex23.test)
+pex23test <- readRDS("pex23test.RDS")
+
+################
+# Get the first 23 columns' names in both datasets
+train_cols <- colnames(pex23train)[1:23]
+test_cols <- colnames(pex23test)[1:23]
+colnames(pex23test)[1:23] <- train_cols
+#Rename the 24th column in the training set to 'ytrain'
+colnames(pex23train)[24] <- "ytrain"
+# Verify the column names in both datasets
+cat("Column names in pex23train:\n")
+print(colnames(pex23train))
+cat("Column names in pex23test:\n")
+print(colnames(pex23test))
+
+##################
+# Set a random seed for reproducibility
+set.seed(23)
+
+# Create the index for training set (80%)
+train_index <- createDataPartition(pex23train$ytrain, p = 0.8, list = FALSE)
+
+# Split the data into training and validation sets
+train_set <- pex23train[train_index, ]
+validation_set <- pex23train[-train_index, ]
+
+
+```
+
+```{r message=FALSE, warning=FALSE}
+
+base_learners <- c("SL.svm", "SL.xgboost", "SL.glm")
+
+# Train Super Learner
+sl <- SuperLearner(Y = train_set$ytrain, X = train_set[,1:23], family = binomial(),
+                  SL.library = base_learners, method = "method.NNloglik", verbose = FALSE)
+
+sl.basecoeff<-sl$coef
+
+# Predict using the Super Learner model
+sl_pred <- predict.SuperLearner(sl, validation_set[,1:23], onlySL = TRUE)$pred
+sl_pred_class <- ifelse(sl_pred > 0.5, 1, 0)
+
+# Calculate misclassification rate
+sl_misclassification_rate <- mean(ifelse(sl$SL.pred> 0.5, 1, 0) != train_set$ytrain)
+print(paste("Super Learner Train Misclassification Rate:", sl_misclassification_rate))
+sl_misclassification_rate <- mean(sl_pred_class != validation_set$ytrain)
+print(paste("Super Learner Validation Misclassification Rate:", sl_misclassification_rate))
+
+# AUC Calculation
+sl_roc <- roc(train_set$ytrain, ifelse(sl$SL.pred> 0.5, 1, 0))
+sl_auc <- auc(sl_roc)
+print(paste("Super Learner Train AUC:", sl_auc))
+plot(sl_roc, col="red", main="ROC Curve for Super Learner on Train Data")
+
+sl_roc <- roc(validation_set$ytrain, sl_pred_class)
+sl_auc <- auc(sl_roc)
+print(paste("Super Learner Validation AUC:", sl_auc))
+plot(sl_roc, col="blue", main="ROC Curve for Super Learner on Validation Data")
+
+#------------------------------------------------------------------------------#
+
+fitness_function <- function(weights) {
+  # Normalize the weights
+  weights <- weights / sum(weights)
+  
+  # Update the coefficients in the Super Learner model
+  sl$coef <- weights
+  
+  # Use predict.SuperLearner with updated coefficients to get predicted values
+  pred_i <- predict.SuperLearner(sl, newdata = train_set[,1:23],onlySL = TRUE)$pred
+  
+  # Calculate accuracy for binary classification
+  pred_class <- ifelse(pred_i > 0.5, 1, 0)
+  accuracy <- mean(pred_class == train_set$ytrain)
+  
+  # Return accuracy
+  return(accuracy)
+}
+
+# Number of base learners
+n_base_learners <- length(base_learners)
+
+# Define Genetic Algorithm
+ga_result <- ga(type = "real-valued", 
+                fitness = fitness_function, 
+                lower = rep(0, length(base_learners)), 
+                upper = rep(1, length(base_learners)),
+                pmutation = 0.3, seed = 23,
+                popSize = 100, run = 10, pcrossover = 0.5, elitism = 2)
+
+# Get the optimal coefficients (weights)
+optimal_weights <- ga_result@solution / sum(ga_result@solution)
+optimal_weights<- colMeans(optimal_weights)
+print(optimal_weights)
+
+# Distribute coefficients based on the optimized weights
+sl$coef <- optimal_weights * sl.basecoeff / sum(optimal_weights * sl.basecoeff)
+print(sl$coef)
+print(sl.basecoeff)
+
+# Use predict.SuperLearner with updated coefficients to get predicted values
+pred_val <- predict.SuperLearner(sl, newdata = validation_set[,1:23], onlySL =  TRUE)$pred
+pred_train <- predict.SuperLearner(sl, newdata = train_set[,1:23], onlySL =  TRUE)$pred
+pred_test<- predict.SuperLearner(sl, newdata = X_test[,1:23], onlySL =  TRUE)$pred
+
+# Generate predicted classes for binary classification
+predicted_class_val <- ifelse(pred_val > 0.5, 1, 0)
+predicted_class_train <- ifelse(pred_train > 0.5, 1, 0)
+predicted_class_test <- ifelse(pred_test > 0.5, 1, 0)
+saveRDS(predicted_class_test, "pex23_test_predictions.rds")
+
+# Calculate Misclassification Rate
+misclassification_rate <- mean(predicted_class_train != train_set$ytrain)
+print(paste("Super Learner Validation Misclassification Rate:", misclassification_rate))
+misclassification_rate <- mean(predicted_class_val != validation_set$ytrain)
+print(paste("Super Learner Validation Misclassification Rate:", misclassification_rate))
+
+# Generate Confusion Matrix 
+conf_matrix <- confusionMatrix(factor(predicted_class_train), factor(train_set$ytrain)) 
+print(conf_matrix)
+conf_matrix <- confusionMatrix(factor(predicted_class_val), factor(validation_set$ytrain)) 
+print(conf_matrix)
+
+# AUC Calculation for binary classification
+
+roc_curve <- roc(train_set$ytrain, predicted_class_train)
+auc_value <- auc(roc_curve)
+print(paste("GA optimised Super Learner Train AUC:", auc_value))
+
+# Plot ROC Curve
+plot(roc_curve, col="red", main="ROC Curve for Super Learner with Optimized Coefficients on Train Data")
+
+roc_curve <- roc(validation_set$ytrain, predicted_class_val)
+auc_value <- auc(roc_curve)
+print(paste("GA optimised Super Learner Validation AUC:", auc_value))
+
+# Plot ROC Curve
+plot(roc_curve, col="blue", main="ROC Curve for Super Learner with Optimized Coefficients on Validation Data")
+
+
+```
+
+
+```{r deepLearningProj1}
+library(keras3) #aw
+library(pROC)
+library(PRROC)
+library(caret)   # For confusionMatrix
+library(ggplot2) # For plotting
+
+# Load the training dataset (pex23train.RDS)
+pex23train <- readRDS("pex23train.RDS")
+# Load the test dataset (pex23.test)
+pex23test <- readRDS("pex23test.RDS")
+
+################
+# Get the first 23 columns' names in both datasets
+train_cols <- colnames(pex23train)[1:23]
+test_cols <- colnames(pex23test)[1:23]
+colnames(pex23test)[1:23] <- train_cols
+#Rename the 24th column in the training set to 'ytrain'
+colnames(pex23train)[24] <- "ytrain"
+# Verify the column names in both datasets
+cat("Column names in pex23train:\n")
+print(colnames(pex23train))
+cat("Column names in pex23test:\n")
+print(colnames(pex23test))
+
+##################
+# Set a random seed for reproducibility
+set.seed(23)
+
+# Create the index for training set (80%)
+train_index <- createDataPartition(pex23train$ytrain, p = 0.8, list = FALSE)
+
+# Split the data into training and validation sets
+train_set <- pex23train[train_index, ]
+validation_set <- pex23train[-train_index, ]
+
+# Step 1: Extract target variable and predictor variables
+train_labels <- train_set$ytrain        # Extract the target variable (binary labels for training)
+train_data <- as.data.frame(train_set[, 1:23]  )      # Select the first 23 columns as predictor variables for training
+# Convert train_data to a data frame if it's a matrix/array
+train_data <- as.data.frame(train_data)
+validation_labels <- validation_set$ytrain  # Extract the target variable (binary labels for testing)
+validation_data <- validation_set[, 1:23] # Select the first 23 columns as predictor variables for testing
+
+# Step 2: Data Preprocessing
+# Normalize the predictors (standardize) for both training and testing data
+train_data <- scale(train_data)        # Scaling predictors for training data
+validation_data <- scale(validation_data) # Scaling predictors for testing data (using same scaling)
+
+# Convert labels to a numeric format (binary classification: 0 or 1)
+train_labels <- as.numeric(train_labels) # Convert to numeric (0 or 1)
+validation_labels <- as.numeric(validation_labels) # Convert to numeric (0 or 1)
+
+# Step 3: Build the Multilayer Perceptron (MLP) model
+# Define the MLP model
+model <- keras_model_sequential() %>%
+  layer_dense(units = 64, activation='relu', input_shape=c(ncol(train_data))) %>%  
+  # First hidden layer with input shape
+  layer_dropout(0.2) %>%  # Dropout for regularization
+  layer_dense(units = 32, activation = 'relu') %>%  # Second hidden layer
+  layer_dropout(0.2) %>%  # Dropout for regularization
+  layer_dense(units = 1, activation = 'sigmoid')  # Output layer (binary classification)
+
+# Step 4: Compile the model
+model %>% compile(
+  loss = 'binary_crossentropy',  # Binary classification loss function
+  optimizer = 'adam',            # Adam optimizer (commonly used)
+  metrics = c('accuracy')        # Accuracy as evaluation metric
+)
+
+# Print the model summary to check the architecture
+summary(model)
+
+# Step 5: Train the model
+history <- model %>% fit(
+  x = train_data, y = train_labels,   # Training data and labels
+  epochs = 50,               # Number of epochs
+  batch_size = 32,           # Batch size
+  validation_data = list(validation_data, validation_labels), # Use validation set for evaluation during training
+  validation_split = 0.15,  # Use 20% of training data for validation
+  verbose = 2                # Print progress during training
+)
+
+# Step 6: Evaluate the model on the validation set
+evaluation <- model %>% evaluate(validation_data, validation_labels)
+print(paste("Validation accuracy:", evaluation[1]))
+print(paste("Validation loss:", evaluation[2]))
+
+# Step 7: Make predictions on the validation data (test data)
+predictions <- model %>% predict(validation_data)
+
+# Convert predictions to binary labels (0 or 1)
+predicted_labels <- ifelse(predictions > 0.5, 1, 0)
+
+
+#aw using ggplot instead of qplot that is deprecated
+# Create a data frame for ggplot
+plot_data <- data.frame(
+  actual = validation_labels,
+  predicted = predicted_labels
+)
+ggplot(plot_data, aes(x = actual, y = predicted)) +
+  geom_jitter(alpha = 0.5, width = 0.1, height = 0) +  # Add jitter
+  theme_minimal() +
+  labs(
+    title = "True vs Predicted Labels'",
+    x = "True Labels",
+    y = "Predicted Labels"
+  )
+
+
+
+
+# Step 8: Visualize the predictions using a scatter plot
+qplot(validation_labels, predicted_labels, xlab = 'True Labels', ylab = 'Predicted Labels', main = 'True vs Predicted Labels') +
+  theme_minimal()
+
+# Step 9: Evaluate model adequacy with additional metrics
+print("about to print the Confusion Matrix")
+# Confusion Matrix
+conf_matrix <- confusionMatrix(as.factor(predicted_labels), as.factor(validation_labels))
+print(conf_matrix)
+print("just printed the Confusion Matrix")
+
+# Mean Squared Error (MSE)
+mse <- mean((validation_labels - predictions)^2)
+print(paste("Mean Squared Error (MSE):", mse))
+
+# ROC Curve and AUC (Area Under Curve)
+roc_curve <- roc(validation_labels, predictions)
+plot(roc_curve, main = "ROC Curve")
+print(paste("AUC:", auc(roc_curve)))
+
+# Precision-Recall Curve and F1 Score
+precision_recall <- pr.curve(scores.class0 = predictions, weights.class0 = validation_labels, curve = T)
+plot(precision_recall, main = "Precision-Recall Curve")
+print(paste("F1 Score:", 2 * precision_recall$precision * precision_recall$recall / (precision_recall$precision + precision_recall$recall)))
+
+
+# Open a new plotting device with specified dimensions
+#dev.new(width = 10, height = 10)  # Width and height in inches
+
+# Step 10: Plot the training history
+# Loss and accuracy over epochs
+# Set up a 2x1 plotting layout
+# par(mfrow = c(2, 1))
+
+# Plot training and validation loss on the same plot
+# plot(history$metrics$loss, type = "l", col = "blue", xlab = "Epoch", ylab = "Loss", main = "Loss", pch = 16, cex = 1.5, lwd = 2)
+# lines(history$metrics$val_loss, col = "red", lty = 2, pch = 16, cex = 1.5, lwd = 2)  # Validation loss with a dashed line
+# legend("topright", legend = c("Training Loss", "Validation Loss"), col = c("blue", "red"), lty = c(1, 2), pch = 16, cex = 1.5, lwd = 2)
+
+# Plot training and validation accuracy on the same plot
+# plot(history$metrics$accuracy, type = "l", col = "blue", xlab = "Epoch", ylab = "Accuracy", main = "Accuracy", pch = 16, cex = 1.5, lwd = 2)
+# lines(history$metrics$val_accuracy, col = "red", lty = 2, pch = 16, cex = 1.5, lwd = 2)  # Validation accuracy with a dashed line
+# legend("bottomright", legend = c("Training Accuracy", "Validation Accuracy"), col = c("blue", "red"), lty = c(1, 2), pch = 16, cex = 1.5, lwd = 2)
+
+## start ggplot changes
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)  # For reshaping data
+# Combine Accuracy Data
+training_accuracy = history$metrics$accuracy
+validation_accuracy = history$metrics$val_accuracy
+epochs <- seq(1, 50)
+accuracy_data <- data.frame(
+ 
+  Epoch = epochs,
+  Accuracy = c(training_accuracy, validation_accuracy),
+  Type = rep(c("Training Accuracy", "Validation Accuracy"), each = length(epochs))
+) # %>%
+# pivot_longer(cols = starts_with("Accuracy"), names_to = "Type", values_to = "Accuracy")
+
+# Plot for Accuracy
+ggplot(accuracy_data, aes(x = Epoch, y = Accuracy, color = Type, linetype = Type)) +
+  geom_line(size = 1.2) +
+  scale_color_manual(values = c("blue", "red")) +
+  labs(
+    title = "Training vs Validation Accuracy",
+    x = "Epoch",
+    y = "Accuracy",
+    color = "Legend",
+    linetype = "Legend"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "top")
+
+
+epochs <- seq(1, 50)  
+training_loss <- history$metrics$loss  
+validation_loss <- history$metrics$val_loss  
+
+# Combine the data into a long format for ggplot
+loss_data <- data.frame(
+  Epoch = epochs,
+  Loss = c(training_loss, validation_loss),
+  Type = rep(c("Training Loss", "Validation Loss"), each = length(epochs))
+)
+
+# ggplot with Training and Validation Loss
+ggplot(loss_data, aes(x = Epoch, y = Loss, color = Type, linetype = Type)) +
+  geom_line(size = 1) +  # Plot lines with defined size
+  geom_point(size = 2) +  # Add points for clarity
+  scale_color_manual(values = c("blue", "red")) +  # Customize colors
+  labs(
+    title = "Training vs Validation Loss",
+    x = "Epoch",
+    y = "Loss",
+    color = "Legend",  # Legend title
+    linetype = "Legend"
+  ) +
+  theme_minimal(base_size = 14) +  # Clean theme with readable font size
+  theme(
+    legend.position = "top",  # Move legend to the top
+    legend.title = element_text(size = 12),  # Adjust legend title size
+    legend.text = element_text(size = 10)  # Adjust legend text size
+  )
+## end ggplot changes
+
+
+# Step 11: Hyperparameter Tuning (Optional)
+# Define grid of hyperparameters to tune (learning rate, batch size, etc.)
+tune_grid <- expand.grid(
+  batch_size = c(32, 64),
+  epochs = c(50, 100)
+)
+
+#dev.off() # close the printing device
+
+# Step 1: Precision-Recall Curve with pROC
+roc_obj <- roc(validation_labels, predictions)
+# Plot the Precision-Recall Curve (you can use ggplot if preferred)
+plot(roc_obj, main = "Precision-Recall Curve")
+
+# Step 2: Calculate Precision, Recall, F1 Score
+# You can calculate the F1 score using caret's confusionMatrix for a binary classification
+conf_matrix <- confusionMatrix(as.factor(predicted_labels), as.factor(validation_labels))
+
+# F1 Score can be calculated from confusion matrix statistics
+precision <- conf_matrix$byClass['Pos Pred Value']
+recall <- conf_matrix$byClass['Sensitivity']
+f1_score <- 2 * (precision * recall) / (precision + recall)
+print(paste("F1 Score:", round(f1_score, 4)))
+
+# You can also directly access precision, recall, and other metrics from the confusion matrix
+print(conf_matrix)
+
+```
